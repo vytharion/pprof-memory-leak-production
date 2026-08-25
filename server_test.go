@@ -63,3 +63,73 @@ func TestAddrFromEnv_HonorsOverride(t *testing.T) {
 		t.Fatalf("addrFromEnv() = %q, want %q", got, ":9090")
 	}
 }
+
+func TestAdminMux_ExposesPprofIndex(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil)
+	rec := httptest.NewRecorder()
+
+	newAdminMux().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin /debug/pprof/ = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestAdminMux_ExposesHeapProfile(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/debug/pprof/heap", nil)
+	rec := httptest.NewRecorder()
+
+	newAdminMux().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin /debug/pprof/heap = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestAdminMux_ExposesGoroutineProfile(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/debug/pprof/goroutine", nil)
+	rec := httptest.NewRecorder()
+
+	newAdminMux().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin /debug/pprof/goroutine = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestAppMux_DoesNotLeakPprof(t *testing.T) {
+	paths := []string{
+		"/debug/pprof/",
+		"/debug/pprof/heap",
+		"/debug/pprof/goroutine",
+		"/debug/pprof/cmdline",
+	}
+	for _, p := range paths {
+		req := httptest.NewRequest(http.MethodGet, p, nil)
+		rec := httptest.NewRecorder()
+
+		newAppMux().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("public %s = %d, want %d (pprof must not leak on the app port)", p, rec.Code, http.StatusNotFound)
+		}
+	}
+}
+
+func TestAdminAddrFromEnv_DefaultsToLoopback(t *testing.T) {
+	t.Setenv("APP_ADMIN_ADDR", "")
+	got := adminAddrFromEnv()
+	if got != defaultAdminAddr {
+		t.Fatalf("adminAddrFromEnv() = %q, want %q", got, defaultAdminAddr)
+	}
+	if !strings.HasPrefix(got, "127.0.0.1") {
+		t.Fatalf("admin default = %q, want loopback bind (127.0.0.1:...)", got)
+	}
+}
+
+func TestAdminAddrFromEnv_HonorsOverride(t *testing.T) {
+	t.Setenv("APP_ADMIN_ADDR", "127.0.0.1:7070")
+	if got := adminAddrFromEnv(); got != "127.0.0.1:7070" {
+		t.Fatalf("adminAddrFromEnv() = %q, want %q", got, "127.0.0.1:7070")
+	}
+}
