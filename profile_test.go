@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestProfileClient_CaptureHeapReturnsGzippedProtobuf(t *testing.T) {
@@ -91,7 +92,7 @@ func TestSaveProfile_CreatesMissingDirectory(t *testing.T) {
 	}
 }
 
-func TestProfileClient_PostLeakHeapGrowsOverBaseline(t *testing.T) {
+func TestProfileClient_PostFixHeapGrowthStaysBounded(t *testing.T) {
 	t.Cleanup(resetSessions)
 	resetSessions()
 
@@ -124,25 +125,26 @@ func TestProfileClient_PostLeakHeapGrowsOverBaseline(t *testing.T) {
 		t.Fatalf("load failed = %d (firstErr=%v)", res.failed, res.firstErr)
 	}
 
+	waitForGoroutinesAtMost(runtime.NumGoroutine(), 500*time.Millisecond)
 	runtime.GC()
 	runtime.GC()
-	postLeak, err := pc.captureHeapText()
+	postFix, err := pc.captureHeapText()
 	if err != nil {
-		t.Fatalf("post-leak capture: %v", err)
+		t.Fatalf("post-fix capture: %v", err)
 	}
-	postBytes, err := heapInuseBytesFromText(postLeak)
+	postBytes, err := heapInuseBytesFromText(postFix)
 	if err != nil {
-		t.Fatalf("post-leak parse: %v", err)
+		t.Fatalf("post-fix parse: %v", err)
 	}
 
-	if postBytes <= baselineBytes {
-		t.Fatalf("in-use bytes did not grow: baseline=%d post=%d", baselineBytes, postBytes)
-	}
 	growth := postBytes - baselineBytes
-	minGrowth := int64(requests*workDefaultPayloadBytes) / 2
-	if growth < minGrowth {
-		t.Fatalf("inuse growth = %d bytes, want >= %d (leak should dominate)", growth, minGrowth)
+	ceiling := int64(maxSessions*workDefaultPayloadBytes) * 8
+	if growth > ceiling {
+		t.Fatalf("inuse growth = %d bytes after %d requests, want <= %d (bounded cache)",
+			growth, requests, ceiling)
 	}
+	t.Logf("inuse growth = %d bytes (baseline=%d, post=%d, ceiling=%d)",
+		growth, baselineBytes, postBytes, ceiling)
 }
 
 func TestProfileClient_PostLeakHeapTextMentionsLeakStack(t *testing.T) {

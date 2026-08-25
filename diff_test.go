@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 const syntheticHeapText = "heap profile: 3: 12000 [3: 12000] @ heap/524288\n" +
@@ -169,7 +170,7 @@ func TestTopAllocatorsReport_ClampsNToEntryCount(t *testing.T) {
 	}
 }
 
-func TestDiffProfiles_RanksLeakSymbolsInTopAllocatorsAfterLoad(t *testing.T) {
+func TestDiffProfiles_TopAllocatorDeltaBoundedAfterFix(t *testing.T) {
 	t.Cleanup(resetSessions)
 	resetSessions()
 
@@ -202,11 +203,12 @@ func TestDiffProfiles_RanksLeakSymbolsInTopAllocatorsAfterLoad(t *testing.T) {
 		t.Fatalf("load failed = %d (firstErr=%v)", res.failed, res.firstErr)
 	}
 
+	waitForGoroutinesAtMost(runtime.NumGoroutine(), 500*time.Millisecond)
 	runtime.GC()
 	runtime.GC()
 	postText, err := pc.captureHeapText()
 	if err != nil {
-		t.Fatalf("post-leak capture: %v", err)
+		t.Fatalf("post capture: %v", err)
 	}
 	postAgg, err := aggregateHeapText(postText)
 	if err != nil {
@@ -218,33 +220,14 @@ func TestDiffProfiles_RanksLeakSymbolsInTopAllocatorsAfterLoad(t *testing.T) {
 		t.Fatalf("diff produced no entries")
 	}
 
-	topN := 10
-	if topN > len(entries) {
-		topN = len(entries)
-	}
-	head := entries[:topN]
-
-	needles := []string{"padPayload", "newSession"}
-	for _, needle := range needles {
-		if !anyEntryContains(head, needle) {
-			names := leafNames(head)
-			t.Fatalf("top-%d diff does not contain %q; got %v", topN, needle, names)
-		}
+	ceiling := int64(maxSessions*workDefaultPayloadBytes) * 4
+	if entries[0].delta > ceiling {
+		t.Fatalf("top entry delta = %d bytes (%s), want <= %d (bounded by cache)",
+			entries[0].delta, entries[0].leaf, ceiling)
 	}
 
-	if entries[0].delta <= 0 {
-		t.Fatalf("top entry delta = %d, want > 0 (leak should dominate)", entries[0].delta)
-	}
-	minTopDelta := int64(requests*workDefaultPayloadBytes) / 4
-	if entries[0].delta < minTopDelta {
-		t.Fatalf("top entry delta = %d, want >= %d (leaked payload volume)", entries[0].delta, minTopDelta)
-	}
-
-	report := topAllocatorsReport(entries, topN)
-	if !strings.Contains(report, "padPayload") {
-		t.Fatalf("report missing padPayload:\n%s", report)
-	}
-	t.Logf("top allocators after leak:\n%s", report)
+	report := topAllocatorsReport(entries, 10)
+	t.Logf("top allocators after fix:\n%s", report)
 }
 
 func anyEntryContains(entries []diffEntry, needle string) bool {

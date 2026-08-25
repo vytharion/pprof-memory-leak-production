@@ -53,13 +53,16 @@ func TestRunLoad_AppliesConcurrencyDefaults(t *testing.T) {
 	}
 }
 
-func TestRunLoad_ReproducesSessionLeakUnderConcurrentLoad(t *testing.T) {
+func TestRunLoad_KeepsSessionsBoundedUnderConcurrentLoad(t *testing.T) {
 	t.Cleanup(resetSessions)
 	resetSessions()
 	srv := httptest.NewServer(newAppMux())
 	t.Cleanup(srv.Close)
 
-	const requests = 64
+	const requests = 200
+	if requests <= maxSessions {
+		t.Fatalf("requests=%d must exceed maxSessions=%d to exercise eviction", requests, maxSessions)
+	}
 	res := runLoad(loadConfig{
 		targetURL:   srv.URL + "/work",
 		concurrency: 8,
@@ -70,12 +73,12 @@ func TestRunLoad_ReproducesSessionLeakUnderConcurrentLoad(t *testing.T) {
 	if res.failed != 0 {
 		t.Fatalf("failed = %d, want 0 (firstErr=%v)", res.failed, res.firstErr)
 	}
-	if got := activeSessions(); got != requests {
-		t.Fatalf("activeSessions() = %d, want %d after sustained load", got, requests)
+	if got := activeSessions(); got > maxSessions {
+		t.Fatalf("activeSessions() = %d, want <= %d after sustained load", got, maxSessions)
 	}
 }
 
-func TestRunLoad_ParksOneGoroutinePerRequest(t *testing.T) {
+func TestRunLoad_KeepsGoroutinesBoundedUnderConcurrentLoad(t *testing.T) {
 	t.Cleanup(resetSessions)
 	resetSessions()
 	runtime.GC()
@@ -84,7 +87,7 @@ func TestRunLoad_ParksOneGoroutinePerRequest(t *testing.T) {
 
 	before := runtime.NumGoroutine()
 
-	const requests = 40
+	const requests = 200
 	runLoad(loadConfig{
 		targetURL:   srv.URL + "/work",
 		concurrency: 8,
@@ -92,14 +95,15 @@ func TestRunLoad_ParksOneGoroutinePerRequest(t *testing.T) {
 		payload:     []byte("x"),
 	})
 
-	waitForGoroutines(before+requests, 1*time.Second)
+	ceiling := before + maxSessions*3
+	waitForGoroutinesAtMost(ceiling, 2*time.Second)
 	after := runtime.NumGoroutine()
-	if delta := after - before; delta < requests {
-		t.Fatalf("goroutine delta = %d, want >= %d after load", delta, requests)
+	if delta := after - before; delta > maxSessions*3 {
+		t.Fatalf("goroutine delta = %d, want <= %d after load (evictions must free workers)", delta, maxSessions*3)
 	}
 }
 
-func TestRunLoad_GrowsRetainedHeapAfterGC(t *testing.T) {
+func TestRunLoad_RetainedHeapStaysBoundedAfterGC(t *testing.T) {
 	t.Cleanup(resetSessions)
 	resetSessions()
 	srv := httptest.NewServer(newAppMux())
@@ -124,18 +128,17 @@ func TestRunLoad_GrowsRetainedHeapAfterGC(t *testing.T) {
 		t.Fatalf("failed = %d, want 0 (firstErr=%v)", res.failed, res.firstErr)
 	}
 
+	waitForGoroutinesAtMost(runtime.NumGoroutine(), 500*time.Millisecond)
 	runtime.GC()
 	runtime.GC()
 	var after runtime.MemStats
 	runtime.ReadMemStats(&after)
 
-	if after.HeapAlloc <= before.HeapAlloc {
-		t.Fatalf("HeapAlloc did not grow: before=%d after=%d", before.HeapAlloc, after.HeapAlloc)
-	}
-	growth := after.HeapAlloc - before.HeapAlloc
-	minGrowth := uint64(requests*workDefaultPayloadBytes) / 2
-	if growth < minGrowth {
-		t.Fatalf("HeapAlloc growth = %d bytes, want >= %d bytes (leaked payloads should survive GC)", growth, minGrowth)
+	growth := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	ceiling := int64(maxSessions*workDefaultPayloadBytes) * 6
+	if growth > ceiling {
+		t.Fatalf("HeapAlloc growth = %d bytes after %d requests, want <= %d bytes (bounded by cache size)",
+			growth, requests, ceiling)
 	}
 }
 

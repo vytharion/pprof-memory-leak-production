@@ -11,19 +11,25 @@ import (
 )
 
 type session struct {
-	id       string
-	payload  []byte
-	events   chan string
-	lastSeen time.Time
+	id        string
+	payload   []byte
+	events    chan string
+	done      chan struct{}
+	closeOnce sync.Once
+	lastSeen  time.Time
 }
 
-var (
-	sessionsMu sync.Mutex
-	sessions   = map[string]*session{}
-	sessionSeq uint64
+const (
+	workDefaultPayloadBytes = 4096
+	defaultMaxSessions      = 32
 )
 
-const workDefaultPayloadBytes = 4096
+var (
+	sessionsMu  sync.Mutex
+	sessions    = map[string]*session{}
+	sessionSeq  uint64
+	maxSessions = defaultMaxSessions
+)
 
 func workHandler(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
@@ -50,6 +56,7 @@ func newSession(id string, body []byte) *session {
 		id:       id,
 		payload:  payload,
 		events:   make(chan string),
+		done:     make(chan struct{}),
 		lastSeen: time.Now(),
 	}
 }
@@ -65,12 +72,53 @@ func padPayload(body []byte, minBytes int) []byte {
 
 func registerSession(s *session) {
 	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	if prev, ok := sessions[s.id]; ok {
+		prev.close()
+	}
 	sessions[s.id] = s
-	sessionsMu.Unlock()
+	for len(sessions) > maxSessions {
+		evictOldestLocked()
+	}
+}
+
+// evictOldestLocked drops the least-recently-seen session so the cache
+// stays under maxSessions. The caller MUST hold sessionsMu.
+func evictOldestLocked() {
+	var (
+		oldestID string
+		oldest   time.Time
+	)
+	for id, s := range sessions {
+		if oldestID == "" || s.lastSeen.Before(oldest) {
+			oldestID = id
+			oldest = s.lastSeen
+		}
+	}
+	if oldestID == "" {
+		return
+	}
+	s := sessions[oldestID]
+	delete(sessions, oldestID)
+	s.close()
+}
+
+// close signals the drain goroutine to exit. sync.Once makes it safe
+// to call from an eviction, an explicit reset, or both.
+func (s *session) close() {
+	s.closeOnce.Do(func() { close(s.done) })
 }
 
 func drainEvents(s *session) {
-	for range s.events {
+	for {
+		select {
+		case <-s.done:
+			return
+		case _, ok := <-s.events:
+			if !ok {
+				return
+			}
+		}
 	}
 }
 
@@ -88,5 +136,8 @@ func activeSessions() int {
 func resetSessions() {
 	sessionsMu.Lock()
 	defer sessionsMu.Unlock()
-	sessions = map[string]*session{}
+	for id, s := range sessions {
+		s.close()
+		delete(sessions, id)
+	}
 }

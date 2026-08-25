@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // syntheticStackedHeapText is a debug=1 heap profile with four
@@ -187,7 +188,7 @@ func TestListReport_RanksAndClampsTopN(t *testing.T) {
 	}
 }
 
-func TestTraceFromLiveHeap_IsolatesLeakingSourceLineAndStack(t *testing.T) {
+func TestTraceFromLiveHeap_PadPayloadStaysBoundedAfterFix(t *testing.T) {
 	t.Cleanup(resetSessions)
 	resetSessions()
 
@@ -209,6 +210,7 @@ func TestTraceFromLiveHeap_IsolatesLeakingSourceLineAndStack(t *testing.T) {
 		t.Fatalf("load failed=%d (firstErr=%v)", res.failed, res.firstErr)
 	}
 
+	waitForGoroutinesAtMost(runtime.NumGoroutine(), 500*time.Millisecond)
 	runtime.GC()
 	runtime.GC()
 	profile, err := pc.captureHeapText()
@@ -229,11 +231,16 @@ func TestTraceFromLiveHeap_IsolatesLeakingSourceLineAndStack(t *testing.T) {
 	if lines[0].line == 0 {
 		t.Fatalf("top line number is zero; expected a real line")
 	}
-	minLeakBytes := int64(requests*workDefaultPayloadBytes) / 4
-	if lines[0].bytes < minLeakBytes {
-		t.Fatalf("top line bytes = %d, want >= %d", lines[0].bytes, minLeakBytes)
+	var padBytes int64
+	for _, l := range lines {
+		padBytes += l.bytes
 	}
-	t.Logf("list padPayload:\n%s", listReport("padPayload", lines, 5))
+	ceiling := int64(maxSessions*workDefaultPayloadBytes) * 4
+	if padBytes > ceiling {
+		t.Fatalf("padPayload in-use = %d bytes across %d source lines, want <= %d (bounded by cache size)",
+			padBytes, len(lines), ceiling)
+	}
+	t.Logf("list padPayload (post-fix):\n%s", listReport("padPayload", lines, 5))
 
 	g, err := buildCallGraph(profile, "padPayload")
 	if err != nil {

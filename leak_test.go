@@ -44,41 +44,56 @@ func TestWorkHandler_GeneratesIDWhenMissing(t *testing.T) {
 	}
 }
 
-func TestWorkHandler_LeaksSessionEntriesUnbounded(t *testing.T) {
+// TestWorkHandler_CapsActiveSessions is the guardrail for the map half
+// of the Step 3 leak: no matter how many requests hit /work, the session
+// cache must never grow past maxSessions.
+func TestWorkHandler_CapsActiveSessions(t *testing.T) {
 	t.Cleanup(resetSessions)
 	resetSessions()
 
-	const n = 25
+	const n = 200
+	if n <= maxSessions {
+		t.Fatalf("n=%d must exceed maxSessions=%d to exercise eviction", n, maxSessions)
+	}
+	mux := newAppMux()
 	for i := 0; i < n; i++ {
-		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/work?id=leak-%d", i), strings.NewReader("x"))
+		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/work?id=b-%d", i), strings.NewReader("x"))
 		rec := httptest.NewRecorder()
-		newAppMux().ServeHTTP(rec, req)
+		mux.ServeHTTP(rec, req)
 	}
 
-	if got := activeSessions(); got != n {
-		t.Fatalf("activeSessions() = %d, want %d (nothing should be evicted)", got, n)
+	if got := activeSessions(); got > maxSessions {
+		t.Fatalf("activeSessions() = %d, want <= %d (cache is bounded)", got, maxSessions)
+	}
+	if got := activeSessions(); got != maxSessions {
+		t.Fatalf("activeSessions() = %d, want == %d after %d inserts", got, maxSessions, n)
 	}
 }
 
-func TestWorkHandler_LeaksOneGoroutinePerRequest(t *testing.T) {
+// TestWorkHandler_ReleasesGoroutinesOnEviction is the guardrail for the
+// goroutine half of the Step 3 leak: evicted sessions must signal their
+// drainEvents goroutine to exit, so runtime.NumGoroutine stays bounded
+// by the cache size regardless of request volume.
+func TestWorkHandler_ReleasesGoroutinesOnEviction(t *testing.T) {
 	t.Cleanup(resetSessions)
 	resetSessions()
 	runtime.GC()
 
 	before := runtime.NumGoroutine()
 
-	const n = 20
+	const n = 200
+	mux := newAppMux()
 	for i := 0; i < n; i++ {
 		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/work?id=g-%d", i), strings.NewReader("x"))
 		rec := httptest.NewRecorder()
-		newAppMux().ServeHTTP(rec, req)
+		mux.ServeHTTP(rec, req)
 	}
 
-	waitForGoroutines(before+n, 500*time.Millisecond)
+	ceiling := before + maxSessions*2
+	waitForGoroutinesAtMost(ceiling, 2*time.Second)
 	after := runtime.NumGoroutine()
-
-	if delta := after - before; delta < n {
-		t.Fatalf("goroutine delta = %d, want at least %d (each request should park one worker)", delta, n)
+	if delta := after - before; delta > maxSessions*2 {
+		t.Fatalf("goroutine delta = %d, want <= %d (evictions must free workers)", delta, maxSessions*2)
 	}
 }
 
@@ -100,10 +115,10 @@ func TestPadPayload_PreservesLongBody(t *testing.T) {
 	}
 }
 
-func waitForGoroutines(target int, timeout time.Duration) {
+func waitForGoroutinesAtMost(target int, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if runtime.NumGoroutine() >= target {
+		if runtime.NumGoroutine() <= target {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
