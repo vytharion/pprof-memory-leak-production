@@ -37,6 +37,7 @@ func helloHandler(w http.ResponseWriter, r *http.Request) {
 func newAppMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hello", helloHandler)
+	mux.HandleFunc("/work", workHandler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
